@@ -6,12 +6,18 @@ import { DIRS, type Dir, type GameState, type Point } from "../src/game/engine.t
 import { buildRequest } from "../src/jev/prompt.ts";
 import type { DecidePayload, DecideResult } from "../src/jev/types.ts";
 
-if (!process.env.TYPESAFE_API_KEY) {
-  console.error("TYPESAFE_API_KEY is missing. Copy .env.example to .env and fill it in.");
+const gatewayKey = process.env.AI_GATEWAY_API_KEY;
+const typesafeKey = process.env.TYPESAFE_API_KEY;
+if (!gatewayKey && !typesafeKey) {
+  console.error("Set AI_GATEWAY_API_KEY (Vercel) or TYPESAFE_API_KEY (TypeSafe) in .env.");
   process.exit(1);
 }
 
-const client = new TypeSafeClient();
+const client = new TypeSafeClient(
+  gatewayKey
+    ? { apiKey: gatewayKey, baseURL: "https://ai-gateway.vercel.sh/typesafe" }
+    : { apiKey: typesafeKey },
+);
 const app = new Hono();
 
 const isPoint = (p: unknown): p is Point =>
