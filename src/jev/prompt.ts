@@ -26,10 +26,20 @@ export function describeMove(f: MoveFacts): string {
 }
 
 const RULES =
-  "You are playing the game Snake. Choose the direction the snake's head moves on the next step. " +
-  "Every listed direction is safe for this single step; the facts next to each direction were computed by code and are exact. " +
-  "A move marked DEAD END almost always loses the game a few steps later. " +
-  "The snake grows by one when it eats the food, and the game ends when the head hits a wall or its own body.";
+  "Choose Snake's next move. Listed moves are legal now; avoid DEAD END traps. " +
+  "Facts describe the position after moving.";
+
+// Laya shares 192 tokens between instructions and options, with 48 per option.
+// Keep model input compact; describeMove remains the fuller explanation for the UI.
+function moveCriterion(f: MoveFacts): string {
+  return [
+    f.eats ? "eats food now" : f.foodDistance === null ? "no food" : `food distance ${f.foodDistance}`,
+    f.deadEnd ? "DEAD END" : "no dead end",
+    `reachable space ${f.reachable}/${f.freeTotal}`,
+    `tail escape ${f.canReachTail ? "yes" : "no"}`,
+    f.turn,
+  ].join("; ");
+}
 
 export interface JevRequest {
   state: Record<string, unknown>;
@@ -40,7 +50,7 @@ export interface JevRequest {
 export function buildRequest(game: GameState, facts: MoveFacts[], strategy: string): JevRequest {
   const head = game.snake[0];
   const criteria: Partial<Record<Dir, string>> = {};
-  for (const f of facts) criteria[f.dir] = describeMove(f);
+  for (const f of facts) criteria[f.dir] = moveCriterion(f);
   return {
     state: {
       board: renderBoard(game),
@@ -52,7 +62,8 @@ export function buildRequest(game: GameState, facts: MoveFacts[], strategy: stri
       gridSize: { rows: game.rows, cols: game.cols },
       foodIsAdjacent: facts.some((f) => f.eats),
     },
-    instructions: `${RULES} Player strategy: ${strategy.trim() || "Stay alive and eat food."}`,
+    // Strategy must survive providers that truncate the end of the question.
+    instructions: `Player strategy: ${strategy.trim() || "Stay alive and eat food."} ${RULES}`,
     criteria,
   };
 }
