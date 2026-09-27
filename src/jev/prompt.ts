@@ -45,11 +45,12 @@ export function describeMove(f: MoveFacts): string {
   ];
   if (f.deadEnd) parts.push("DEAD END: less room than the snake is long and no way to follow the tail out");
   else if (f.canReachTail) parts.push("can still follow its own tail out");
+  if (f.cycleRisk) parts.push("CYCLE RISK: repeats loop");
   return parts.join("; ");
 }
 
 const RULES =
-  "Choose Snake's next move. Listed moves are legal now; avoid DEAD END traps. " +
+  "Choose Snake's next move. Listed moves are legal now; avoid DEAD END traps and CYCLE loops. " +
   "Prefer moves that move closer to food. Facts describe the position after moving.";
 
 // Laya shares 192 tokens between instructions and options, with 48 per option.
@@ -68,6 +69,7 @@ function moveCriterion(f: MoveFacts): string {
   return [
     foodDesc,
     f.deadEnd ? "DEAD END" : "no dead end",
+    f.cycleRisk ? "CYCLE RISK" : "no cycle",
     `reachable space ${f.reachable}/${f.freeTotal}`,
     `tail escape ${f.canReachTail ? "yes" : "no"}`,
   ].join("; ");

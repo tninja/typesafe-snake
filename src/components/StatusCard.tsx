@@ -61,6 +61,7 @@ export function StatusCard({ snapshot }: { snapshot: Snapshot }) {
         <Row label="Late decisions" value={String(stats.late)} tone={stats.late > 0 ? "warn" : undefined} />
         <Row label="Forced moves" value={String(stats.forced)} />
         <Row label="API errors" value={String(stats.errors)} tone={stats.errors > 0 ? "danger" : undefined} />
+        <Row label="Cycles broken" value={String(stats.cyclesBroken)} tone={stats.cyclesBroken > 0 ? "ok" : undefined} />
         <Row label="Last model" value={lastModel ?? "—"} />
         <Row label="Last API error" value={lastError ?? "none"} tone={lastError ? "danger" : undefined} />
       </div>

@@ -30,6 +30,8 @@ export interface MoveFacts {
   deadEnd: boolean;
   /** The tail is adjacent to the reachable region, so the snake can follow it out. */
   canReachTail: boolean;
+  /** Whether stepping here continues a detected repeating cycle. */
+  cycleRisk?: boolean;
 }
 
 const CLOCKWISE: Record<Dir, Dir> = { up: "right", right: "down", down: "left", left: "up" };

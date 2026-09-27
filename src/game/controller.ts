@@ -8,6 +8,12 @@ export type Status = "idle" | "running" | "paused" | "over";
 /** How the move for one tick was chosen. */
 export type Source = "jev" | "late" | "error" | "forced";
 
+export interface CycleInfo {
+  detected: boolean;
+  length: number;
+  repeatDir: Dir | null;
+}
+
 export interface Decision {
   phase: "deciding" | "selected" | Exclude<Source, "jev">;
   options: MoveFacts[];
@@ -18,6 +24,7 @@ export interface Decision {
   latencyMs: number | null;
   upstreamMs: number | null;
   error: string | null;
+  cycle?: CycleInfo | null;
 }
 
 export interface HistoryEntry {
@@ -42,6 +49,7 @@ export interface Stats {
   late: number;
   errors: number;
   forced: number;
+  cyclesBroken: number;
   totalLatencyMs: number;
 }
 
@@ -59,7 +67,37 @@ export interface Snapshot {
   lastError: string | null;
 }
 
-const EMPTY_STATS: Stats = { calls: 0, answered: 0, late: 0, errors: 0, forced: 0, totalLatencyMs: 0 };
+export interface StateVisit {
+  r: number;
+  c: number;
+  heading: Dir;
+  step: number;
+  dir?: Dir;
+}
+
+export function detectCycle(
+  visits: StateVisit[],
+  head: { r: number; c: number },
+  heading: Dir,
+  currentStep: number,
+): CycleInfo | null {
+  for (let i = visits.length - 1; i >= 0; i--) {
+    const v = visits[i];
+    if (v.r === head.r && v.c === head.c && v.heading === heading) {
+      const length = currentStep - v.step;
+      if (length >= 4) {
+        return {
+          detected: true,
+          length,
+          repeatDir: v.dir ?? null,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+const EMPTY_STATS: Stats = { calls: 0, answered: 0, late: 0, errors: 0, forced: 0, cyclesBroken: 0, totalLatencyMs: 0 };
 const HISTORY_LIMIT = 60;
 
 export interface ControllerOptions {
@@ -82,6 +120,8 @@ export class GameController {
   private inflight: AbortController | null = null;
   private epoch = 0;
   private pending: { dir: Dir; source: Source } | null = null;
+  private visits: StateVisit[] = [];
+  private lastScore = 0;
   private seed: number;
   private readonly decide: Decide;
   private readonly now: () => number;
@@ -148,6 +188,8 @@ export class GameController {
   reset() {
     this.cancelTick();
     this.seed = (this.seed + 1) | 0;
+    this.visits = [];
+    this.lastScore = 0;
     this.set({
       game: createGame({ ...this.size, seed: this.seed }),
       status: "idle",
@@ -175,7 +217,25 @@ export class GameController {
   private beginTick() {
     const epoch = ++this.epoch;
     const { game, tickMs, strategy } = this.snapshot;
-    const options = analyze(game);
+    if (game.score !== this.lastScore) {
+      this.visits = [];
+      this.lastScore = game.score;
+    }
+
+    const cycle = detectCycle(this.visits, game.snake[0], game.heading, game.steps);
+    const cycleCells = cycle
+      ? new Set(this.visits.slice(-cycle.length).map((v) => `${v.r},${v.c}`))
+      : null;
+    const baseOptions = analyze(game);
+    const options: MoveFacts[] = baseOptions.map((o) => {
+      const isRepeat = cycle ? o.dir === cycle.repeatDir : false;
+      const hitsCycleCell = cycleCells ? cycleCells.has(`${o.target.r},${o.target.c}`) : false;
+      return {
+        ...o,
+        cycleRisk: isRepeat || hitsCycleCell,
+      };
+    });
+
     const startedAt = this.now();
     const blank: Decision = {
       phase: "deciding",
@@ -187,6 +247,7 @@ export class GameController {
       latencyMs: null,
       upstreamMs: null,
       error: null,
+      cycle,
     };
     this.pending = null;
 
@@ -203,19 +264,47 @@ export class GameController {
       });
       const controller = new AbortController();
       this.inflight = controller;
-      this.decide(game, strategy, controller.signal).then(
+      const activeStrategy = cycle?.detected
+        ? `${strategy} [CRITICAL: Snake is trapped in a repeating cycle of ${cycle.length} steps. Avoid ${cycle.repeatDir ? `move "${cycle.repeatDir}" and ` : ""}repeating the loop. Pick an alternative safe move.]`
+        : strategy;
+      this.decide(game, activeStrategy, controller.signal).then(
         (result) => {
           if (epoch !== this.epoch || this.pending) return;
           const legal = options.some((o) => o.dir === result.choice);
           if (!legal) return this.fail(epoch, blank, `illegal choice "${result.choice}"`);
+
+          let choiceDir = result.choice;
+          let brokenCycle = false;
+          const chosenOpt = options.find((o) => o.dir === result.choice);
+          const continuesCycle = cycle?.detected && (result.choice === cycle.repeatDir || chosenOpt?.cycleRisk);
+          if (continuesCycle) {
+            let safeAlts = options.filter((o) => !o.deadEnd && !o.cycleRisk);
+            if (safeAlts.length === 0) {
+              safeAlts = options.filter((o) => !o.deadEnd && o.dir !== cycle.repeatDir);
+            }
+            if (safeAlts.length > 0) {
+              safeAlts.sort((a, b) => {
+                const aFood = a.foodDelta === "closer" ? 2 : a.foodDelta === "same" ? 1 : 0;
+                const bFood = b.foodDelta === "closer" ? 2 : b.foodDelta === "same" ? 1 : 0;
+                if (aFood !== bFood) return bFood - aFood;
+                return b.reachable - a.reachable;
+              });
+              choiceDir = safeAlts[0].dir;
+              brokenCycle = true;
+            }
+          }
+
           const latencyMs = Math.round(this.now() - startedAt);
-          this.pending = { dir: result.choice, source: "jev" };
+          this.pending = { dir: choiceDir, source: "jev" };
           this.set({
             lastModel: result.model,
+            stats: brokenCycle
+              ? { ...this.snapshot.stats, cyclesBroken: this.snapshot.stats.cyclesBroken + 1 }
+              : this.snapshot.stats,
             decision: {
               ...blank,
               phase: "selected",
-              dir: result.choice,
+              dir: choiceDir,
               probabilities: result.probabilities,
               confidence: result.confidence,
               model: result.model,
@@ -247,7 +336,30 @@ export class GameController {
     this.inflight?.abort();
     this.inflight = null;
 
-    const played = this.pending ?? { dir: fallbackMove(game), source: "late" as const };
+    let played = this.pending;
+    let lateBrokeCycle = false;
+    if (!played) {
+      let dir = fallbackMove(game);
+      const cycle = decision?.cycle;
+      if (cycle?.detected && dir === cycle.repeatDir) {
+        const safeAlts = (decision?.options ?? []).filter((o) => !o.deadEnd && o.dir !== cycle.repeatDir);
+        if (safeAlts.length > 0) {
+          dir = safeAlts[0].dir;
+          lateBrokeCycle = true;
+        }
+      }
+      played = { dir, source: "late" as const };
+    }
+
+    this.visits.push({
+      r: game.snake[0].r,
+      c: game.snake[0].c,
+      heading: game.heading,
+      step: game.steps,
+      dir: played.dir,
+    });
+    if (this.visits.length > 100) this.visits.shift();
+
     const latencyMs = played.source === "jev" ? (decision?.latencyMs ?? null) : null;
     const next = step(game, played.dir);
     const entry: HistoryEntry = {
@@ -275,6 +387,7 @@ export class GameController {
         late: stats.late + (played.source === "late" ? 1 : 0),
         errors: stats.errors + (played.source === "error" ? 1 : 0),
         forced: stats.forced + (played.source === "forced" ? 1 : 0),
+        cyclesBroken: stats.cyclesBroken + (lateBrokeCycle ? 1 : 0),
         totalLatencyMs: stats.totalLatencyMs + (latencyMs ?? 0),
       },
       decision:

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Decide } from "../jev/client.ts";
 import type { DecideResult } from "../jev/types.ts";
-import { GameController } from "./controller.ts";
+import { GameController, detectCycle } from "./controller.ts";
 import type { Dir } from "./engine.ts";
 
 const answer = (choice: Dir): DecideResult => ({
@@ -93,4 +93,65 @@ describe("GameController", () => {
     expect(s.stats.forced).toBeGreaterThan(0);
     c.dispose();
   });
+
+  it("detects a 4-step cycle in state visits", () => {
+    const visits = [
+      { r: 5, c: 5, heading: "right" as const, step: 0, dir: "down" as const },
+      { r: 6, c: 5, heading: "down" as const, step: 1, dir: "left" as const },
+      { r: 6, c: 4, heading: "left" as const, step: 2, dir: "up" as const },
+      { r: 5, c: 4, heading: "up" as const, step: 3, dir: "right" as const },
+    ];
+    // Now at step 4, the snake is back at (5, 5) heading "right"
+    const cycle = detectCycle(visits, { r: 5, c: 5 }, "right", 4);
+    expect(cycle).toEqual({
+      detected: true,
+      length: 4,
+      repeatDir: "down",
+    });
+  });
+
+  it("returns null when no repeating cycle exists", () => {
+    const visits = [
+      { r: 5, c: 5, heading: "right" as const, step: 0, dir: "right" as const },
+      { r: 5, c: 6, heading: "right" as const, step: 1, dir: "right" as const },
+    ];
+    const cycle = detectCycle(visits, { r: 5, c: 7 }, "right", 2);
+    expect(cycle).toBeNull();
+  });
+
+  it("breaks a repeating loop when Jev keeps picking the cycle move", async () => {
+    // Sequence of moves that would form a 4-step loop if repeated:
+    // Starting facing right: down -> left -> up -> right -> down (loop!)
+    const loopMoves: Dir[] = ["down", "left", "up", "right", "down", "left", "up"];
+    let stepCount = 0;
+    const loopingDecide: Decide = () => {
+      const choice = loopMoves[stepCount] ?? "down";
+      stepCount++;
+      return Promise.resolve(answer(choice));
+    };
+
+    const c = new GameController({
+      decide: loopingDecide,
+      tickMs: 100,
+      cols: 16,
+      rows: 16,
+      seed: 1,
+      now: Date.now,
+    });
+    c.start();
+
+    // Advance by 5 ticks (steps 0 to 4):
+    // step 0: plays down
+    // step 1: plays left
+    // step 2: plays up
+    // step 3: plays right -> back to original cell facing right!
+    // step 4: decider wants to play "down", but controller detects the 4-step cycle and breaks it!
+    await vi.advanceTimersByTimeAsync(500);
+
+    const s = c.getSnapshot();
+    expect(s.stats.cyclesBroken).toBeGreaterThanOrEqual(1);
+    expect(s.game.alive).toBe(true);
+    c.dispose();
+  });
 });
+

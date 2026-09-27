@@ -1,5 +1,6 @@
 import { TypeSafeClient, choice } from "@typesafe-ai/sdk";
 import { analyze, heuristicMove, type MoveFacts } from "../src/game/analysis.ts";
+import { detectCycle, type StateVisit } from "../src/game/controller.ts";
 import { createGame, step, type Dir, type GameState } from "../src/game/engine.ts";
 import { buildRequest, renderBoard, LEGEND, PRESETS, type RelativeMove } from "../src/jev/prompt.ts";
 
@@ -44,20 +45,38 @@ interface GameRunSummary {
   avgLatencyMs: number;
 }
 
-async function runGame(mode: "old" | "new" | "hybrid", seed: number, maxSteps = 40): Promise<GameRunSummary> {
+async function runGame(
+  mode: "old" | "new" | "hybrid" | "cycleBreaker",
+  seed: number,
+  maxSteps = 40,
+): Promise<GameRunSummary> {
   let game = createGame({ cols: 8, rows: 8, seed });
   let straightCount = 0;
   let decideCount = 0;
   let totalLatency = 0;
+  let visits: StateVisit[] = [];
+  let lastScore = 0;
 
   for (let s = 0; s < maxSteps; s++) {
     if (!game.alive || game.won) break;
 
-    const facts = analyze(game);
-    if (facts.length === 0) {
+    if (game.score !== lastScore) {
+      visits = [];
+      lastScore = game.score;
+    }
+
+    const baseFacts = analyze(game);
+    if (baseFacts.length === 0) {
       game = step(game, game.heading);
       break;
     }
+
+    const cycle = mode === "cycleBreaker" ? detectCycle(visits, game.snake[0], game.heading, game.steps) : null;
+    const cycleCells = cycle ? new Set(visits.slice(-cycle.length).map((v) => `${v.r},${v.c}`)) : null;
+    const facts = baseFacts.map((o) => ({
+      ...o,
+      cycleRisk: cycle ? o.dir === cycle.repeatDir || (cycleCells ? cycleCells.has(`${o.target.r},${o.target.c}`) : false) : false,
+    }));
 
     let chosenDir: Dir;
 
@@ -67,7 +86,7 @@ async function runGame(mode: "old" | "new" | "hybrid", seed: number, maxSteps = 
       const prevHeading = game.heading;
       const t0 = performance.now();
 
-      const heuristic = mode === "hybrid" ? heuristicMove(facts) : null;
+      const heuristic = mode === "hybrid" || mode === "cycleBreaker" ? heuristicMove(facts) : null;
       if (heuristic) {
         chosenDir = heuristic;
       } else if (mode === "old") {
@@ -78,13 +97,35 @@ async function runGame(mode: "old" | "new" | "hybrid", seed: number, maxSteps = 
         });
         chosenDir = res.answers.move.choice as Dir;
       } else {
-        const req = buildRequest(game, facts, PRESETS.safe);
+        const strategy = cycle?.detected
+          ? `${PRESETS.safe} [CRITICAL: Snake is trapped in a repeating cycle of ${cycle.length} steps. Avoid ${cycle.repeatDir ? `move "${cycle.repeatDir}" and ` : ""}repeating the loop. Pick an alternative safe move.]`
+          : PRESETS.safe;
+        const req = buildRequest(game, facts, strategy);
         const res = await client.systemOne({
           state: req.state as never,
           questions: { move: choice(req.instructions, req.criteria as Record<string, string>) },
         });
         const choiceRel = res.answers.move.choice as RelativeMove;
         chosenDir = req.relativeToDir[choiceRel] ?? (res.answers.move.choice as Dir);
+
+        if (mode === "cycleBreaker" && cycle?.detected) {
+          const chosenOpt = facts.find((o) => o.dir === chosenDir);
+          if (chosenDir === cycle.repeatDir || chosenOpt?.cycleRisk) {
+            let safeAlts = facts.filter((o) => !o.deadEnd && !o.cycleRisk);
+            if (safeAlts.length === 0) {
+              safeAlts = facts.filter((o) => !o.deadEnd && o.dir !== cycle.repeatDir);
+            }
+            if (safeAlts.length > 0) {
+              safeAlts.sort((a, b) => {
+                const aFood = a.foodDelta === "closer" ? 2 : a.foodDelta === "same" ? 1 : 0;
+                const bFood = b.foodDelta === "closer" ? 2 : b.foodDelta === "same" ? 1 : 0;
+                if (aFood !== bFood) return bFood - aFood;
+                return b.reachable - a.reachable;
+              });
+              chosenDir = safeAlts[0].dir;
+            }
+          }
+        }
       }
       totalLatency += performance.now() - t0;
       decideCount++;
@@ -92,6 +133,15 @@ async function runGame(mode: "old" | "new" | "hybrid", seed: number, maxSteps = 
         straightCount++;
       }
     }
+
+    visits.push({
+      r: game.snake[0].r,
+      c: game.snake[0].c,
+      heading: game.heading,
+      step: game.steps,
+      dir: chosenDir,
+    });
+    if (visits.length > 100) visits.shift();
 
     game = step(game, chosenDir);
   }
@@ -143,18 +193,32 @@ async function main() {
     console.log(`Steps: ${res.steps}, Score: ${res.score}, Straight %: ${res.straightRatio}%, Death: ${res.deathReason ?? "survived"}`);
   }
 
+  console.log("\n=======================================================");
+  console.log("4. BENCHMARKING CYCLE BREAKER (Hybrid + Loop Detection & Cycle Breaking)");
+  console.log("=======================================================");
+  const cycleResults: GameRunSummary[] = [];
+  for (const seed of seeds) {
+    process.stdout.write(`  Running seed ${seed}... `);
+    const res = await runGame("cycleBreaker", seed, 35);
+    cycleResults.push(res);
+    console.log(`Steps: ${res.steps}, Score: ${res.score}, Straight %: ${res.straightRatio}%, Death: ${res.deathReason ?? "survived"}`);
+  }
+
   const avgOldScore = oldResults.reduce((a, b) => a + b.score, 0) / oldResults.length;
   const avgOldStraight = oldResults.reduce((a, b) => a + b.straightRatio, 0) / oldResults.length;
   const avgNewScore = newResults.reduce((a, b) => a + b.score, 0) / newResults.length;
   const avgNewStraight = newResults.reduce((a, b) => a + b.straightRatio, 0) / newResults.length;
   const avgHybridScore = hybridResults.reduce((a, b) => a + b.score, 0) / hybridResults.length;
   const avgHybridStraight = hybridResults.reduce((a, b) => a + b.straightRatio, 0) / hybridResults.length;
+  const avgCycleScore = cycleResults.reduce((a, b) => a + b.score, 0) / cycleResults.length;
+  const avgCycleStraight = cycleResults.reduce((a, b) => a + b.straightRatio, 0) / cycleResults.length;
 
   console.log("\n=======================================================");
   console.log("SUMMARY COMPARISON:");
   console.log(`  1. Old Prompt         -> Avg Score: ${avgOldScore.toFixed(1)}, Avg Straight: ${avgOldStraight.toFixed(1)}%`);
   console.log(`  2. New Prompt         -> Avg Score: ${avgNewScore.toFixed(1)}, Avg Straight: ${avgNewStraight.toFixed(1)}%`);
   console.log(`  3. New + Heuristics   -> Avg Score: ${avgHybridScore.toFixed(1)}, Avg Straight: ${avgHybridStraight.toFixed(1)}%`);
+  console.log(`  4. Cycle Breaker      -> Avg Score: ${avgCycleScore.toFixed(1)}, Avg Straight: ${avgCycleStraight.toFixed(1)}%`);
   console.log("=======================================================\n");
 }
 

@@ -6,19 +6,21 @@ import { ARROW, pct } from "./StatusCard.tsx";
 export function CurrentDecision({ decision }: { decision: Decision | null }) {
   const settled = decision !== null && decision.phase !== "deciding";
   const sub =
-    decision?.phase === "selected"
-      ? `${pct(decision.confidence)} confident · ${decision.latencyMs} ms round trip · api ${decision.upstreamMs} ms`
-      : decision?.phase === "forced"
-        ? decision.options.length === 0
-          ? "No legal move left"
-          : "Only one legal move, decided in code without an API call"
-        : decision?.phase === "late"
-          ? "Jev answered after the deadline"
-          : decision?.phase === "error"
-            ? (decision.error ?? "")
-            : decision
-              ? "Waiting for Jev"
-              : "Facts for each legal move show up here";
+    decision?.cycle?.detected
+      ? `Loop detected (${decision.cycle.length} steps) · Breaking cycle`
+      : decision?.phase === "selected"
+        ? `${pct(decision.confidence)} confident · ${decision.latencyMs} ms round trip · api ${decision.upstreamMs} ms`
+        : decision?.phase === "forced"
+          ? decision.options.length === 0
+            ? "No legal move left"
+            : "Only one legal move, decided in code without an API call"
+          : decision?.phase === "late"
+            ? "Jev answered after the deadline"
+            : decision?.phase === "error"
+              ? (decision.error ?? "")
+              : decision
+                ? "Waiting for Jev"
+                : "Facts for each legal move show up here";
 
   return (
     <Card
@@ -32,7 +34,7 @@ export function CurrentDecision({ decision }: { decision: Decision | null }) {
               ? "Asking Jev"
               : "No open decision"
       }
-      badge={<Badge>{decision ? `${decision.options.length} LEGAL` : "—"}</Badge>}
+      badge={<Badge tone={decision?.cycle?.detected ? "warn" : undefined}>{decision ? `${decision.options.length} LEGAL` : "—"}</Badge>}
     >
       <p className="card-sub">{sub}</p>
       <div className="options">
@@ -40,7 +42,7 @@ export function CurrentDecision({ decision }: { decision: Decision | null }) {
           const p = decision.probabilities[o.dir];
           const picked = settled && decision.dir === o.dir;
           return (
-            <div key={o.dir} className={`option ${picked ? "picked" : ""} ${o.deadEnd ? "danger" : ""}`}>
+            <div key={o.dir} className={`option ${picked ? "picked" : ""} ${o.deadEnd ? "danger" : ""} ${o.cycleRisk ? "warn" : ""}`}>
               <div className="bar-row">
                 <span className="bar-name">
                   {ARROW[o.dir]} {o.dir}
