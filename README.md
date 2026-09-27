@@ -40,6 +40,15 @@ Keep custom strategies short: long instructions can still be truncated by Laya.
 The dashboard retains the full move explanations. Fitting the prompt prevents
 lost instructions; it does not guarantee that the model chooses the best move.
 
+## Local Laya integration tests
+
+Run `pnpm test:laya --dry-run` to inspect 20 hand-labelled boards, then
+`pnpm test:laya` with your local Laya server running. This integration suite calls the real Laya server directly
+for all option permutations (104 requests), recording accuracy, order sensitivity,
+latency, and errors in `eval-results/`. See the [evaluation guide](docs/laya-evaluation.md)
+for setup, report interpretation, and limitations. Wrong answers or request errors
+produce exit code 1. This does not change gameplay. `pnpm test` runs offline unit tests only.
+
 ## Layout
 
 - `src/game/engine.ts` – pure snake engine (seeded RNG)
