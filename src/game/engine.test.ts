@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyze, analyzeMove, fallbackMove, floodFill, legalMoves } from "./analysis.ts";
+import { analyze, analyzeMove, fallbackMove, floodFill, heuristicMove, legalMoves } from "./analysis.ts";
 import { type GameState, createGame, isFatal, step } from "./engine.ts";
 
 /** Build a state from ASCII rows: H head, digits 1-9 body order, F food. */
@@ -119,7 +119,9 @@ describe("analysis", () => {
     const right = facts.find((f) => f.dir === "right")!;
     expect(right.eats).toBe(true);
     expect(right.foodDistance).toBe(0);
+    expect(right.foodDelta).toBe("closer");
     expect(facts.find((f) => f.dir === "up")!.foodDistance).toBe(2);
+    expect(facts.find((f) => f.dir === "up")!.foodDelta).toBe("farther");
     expect(right.turn).toBe("straight");
     expect(facts.find((f) => f.dir === "up")!.turn).toBe("left turn");
   });
@@ -127,5 +129,28 @@ describe("analysis", () => {
   it("falls back to straight, then to any legal move", () => {
     expect(fallbackMove(fromAscii([".....", ".21H.", "....."], "right"))).toBe("right");
     expect(fallbackMove(fromAscii(["21H", "..."], "right"))).toBe("down");
+  });
+
+  describe("heuristicMove", () => {
+    it("chooses to eat food directly when safe", () => {
+      const g = fromAscii([".....", ".21HF", "....."], "right");
+      const facts = analyze(g);
+      expect(heuristicMove(facts)).toBe("right");
+    });
+
+    it("returns null when multiple safe moves exist and food is not adjacent", () => {
+      const g = fromAscii([".....", ".21H.", "....."], "right");
+      const facts = analyze(g);
+      expect(heuristicMove(facts)).toBeNull();
+    });
+
+    it("picks the single surviving move when other moves are dead ends", () => {
+      // deadEnd: reachable space < snake length
+      const facts = [
+        { dir: "up" as const, eats: false, deadEnd: true, reachable: 1, freeTotal: 10, canReachTail: false } as any,
+        { dir: "down" as const, eats: false, deadEnd: false, reachable: 9, freeTotal: 10, canReachTail: true } as any,
+      ];
+      expect(heuristicMove(facts)).toBe("down");
+    });
   });
 });

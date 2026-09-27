@@ -1,9 +1,9 @@
 import { serve } from "@hono/node-server";
 import { TypeSafeClient, choice } from "@typesafe-ai/sdk";
 import { Hono } from "hono";
-import { analyze } from "../src/game/analysis.ts";
+import { analyze, heuristicMove } from "../src/game/analysis.ts";
 import { DIRS, type Dir, type GameState, type Point } from "../src/game/engine.ts";
-import { buildRequest } from "../src/jev/prompt.ts";
+import { buildRequest, type RelativeMove } from "../src/jev/prompt.ts";
 import type { DecidePayload, DecideResult } from "../src/jev/types.ts";
 
 const gatewayKey = process.env.AI_GATEWAY_API_KEY;
@@ -55,6 +55,19 @@ app.post("/api/decide", async (c) => {
   const facts = analyze(game);
   if (facts.length < 2) return c.json({ error: "fewer than two legal moves; decide in code" }, 400);
 
+  const heuristic = heuristicMove(facts);
+  if (heuristic) {
+    const result: DecideResult = {
+      choice: heuristic,
+      probabilities: { [heuristic]: 1 },
+      confidence: 1,
+      model: "heuristic",
+      upstreamMs: 0,
+      inputTokens: 0,
+    };
+    return c.json(result);
+  }
+
   const strategy = typeof body.strategy === "string" ? body.strategy.slice(0, 600) : "";
   const request = buildRequest(game, facts, strategy);
   const started = performance.now();
@@ -68,9 +81,22 @@ app.post("/api/decide", async (c) => {
       { signal: c.req.raw.signal, timeout: 5000, retry: { maxRetries: 0 } },
     );
     const answer = res.answers.move;
+    const choiceRel = answer.choice as RelativeMove;
+    const choiceDir = (request.relativeToDir[choiceRel] ?? answer.choice) as Dir;
+
+    const probabilities: Partial<Record<Dir, number>> = {};
+    if (answer.probabilities) {
+      for (const [key, prob] of Object.entries(answer.probabilities)) {
+        const dir = (request.relativeToDir[key as RelativeMove] ?? key) as Dir;
+        if (typeof prob === "number") {
+          probabilities[dir] = prob;
+        }
+      }
+    }
+
     const result: DecideResult = {
-      choice: answer.choice as Dir,
-      probabilities: answer.probabilities as Partial<Record<Dir, number>>,
+      choice: choiceDir,
+      probabilities,
       confidence: answer.confidence,
       model: res.model,
       upstreamMs: Math.round(performance.now() - started),

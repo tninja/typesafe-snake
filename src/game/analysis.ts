@@ -11,6 +11,7 @@ import {
 } from "./engine.ts";
 
 export type Turn = "straight" | "left turn" | "right turn";
+export type FoodDelta = "closer" | "farther" | "same";
 
 export interface MoveFacts {
   dir: Dir;
@@ -19,6 +20,8 @@ export interface MoveFacts {
   eats: boolean;
   /** Manhattan distance from the new head to the food, null when there is no food. */
   foodDistance: number | null;
+  /** Whether this move moves closer to, farther from, or maintains distance to food. */
+  foodDelta: FoodDelta | null;
   /** Empty cells reachable from the new head after the move (new head excluded). */
   reachable: number;
   /** All empty cells on the board after the move. */
@@ -76,12 +79,25 @@ export function analyzeMove(state: GameState, dir: Dir): MoveFacts {
     const n = move(tail, d);
     return samePoint(n, target) || region.has(n.r * cols + n.c);
   });
+  const head = state.snake[0];
+  const currentFoodDistance = food ? Math.abs(food.r - head.r) + Math.abs(food.c - head.c) : null;
+  const foodDistance = food ? Math.abs(food.r - target.r) + Math.abs(food.c - target.c) : null;
+  const foodDelta: FoodDelta | null =
+    currentFoodDistance === null || foodDistance === null
+      ? null
+      : foodDistance < currentFoodDistance
+        ? "closer"
+        : foodDistance > currentFoodDistance
+          ? "farther"
+          : "same";
+
   return {
     dir,
     turn: turnOf(state.heading, dir),
     target,
     eats,
-    foodDistance: food ? Math.abs(food.r - target.r) + Math.abs(food.c - target.c) : null,
+    foodDistance,
+    foodDelta,
     reachable: region.size,
     freeTotal: cols * rows - after.length,
     deadEnd: region.size < after.length && !canReachTail,
@@ -99,3 +115,23 @@ export function fallbackMove(state: GameState): Dir {
   if (legal.length === 0 || legal.includes(state.heading)) return state.heading;
   return legal[0];
 }
+
+/**
+ * Fast heuristic decision for obvious moves:
+ * 1. Safe eat: If a move eats the food directly and is not a dead end.
+ * 2. Trap avoidance: If exactly one legal move avoids a dead end.
+ */
+export function heuristicMove(facts: MoveFacts[]): Dir | null {
+  if (facts.length < 2) return facts[0]?.dir ?? null;
+
+  // 1. Immediately eat food if it does not lead to a dead end
+  const safeEater = facts.find((f) => f.eats && !f.deadEnd);
+  if (safeEater) return safeEater.dir;
+
+  // 2. Only one move avoids a dead end
+  const nonDeadEnds = facts.filter((f) => !f.deadEnd);
+  if (nonDeadEnds.length === 1) return nonDeadEnds[0].dir;
+
+  return null;
+}
+
