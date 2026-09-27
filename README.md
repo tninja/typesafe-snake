@@ -23,6 +23,23 @@ Keep `.env` private. The API key lives only in the Hono proxy (`server/index.ts`
 the browser calls `/api/decide`. Live Jev requests can incur charges on your
 Vercel account while the game is running.
 
+### Local Laya
+
+With a TypeSafe-compatible Laya server running at `http://127.0.0.1:8000`,
+set these values in `.env` and restart `pnpm dev`:
+
+```dotenv
+AI_GATEWAY_API_KEY=
+TYPESAFE_API_KEY=local
+TYPESAFE_BASE_URL=http://127.0.0.1:8000
+```
+
+The prompt puts the player strategy first and uses compact move facts so the
+built-in strategies fit Laya's shared 192-token instruction/option budget.
+Keep custom strategies short: long instructions can still be truncated by Laya.
+The dashboard retains the full move explanations. Fitting the prompt prevents
+lost instructions; it does not guarantee that the model chooses the best move.
+
 ## Layout
 
 - `src/game/engine.ts` – pure snake engine (seeded RNG)
