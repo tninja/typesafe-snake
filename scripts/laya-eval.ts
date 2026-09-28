@@ -63,22 +63,64 @@ export interface Result extends Trial {
   latencyMs: number;
   choice?: RelativeMove;
   chosenDir?: Dir;
+  probabilities?: Partial<Record<RelativeMove, number>>;
   response?: unknown;
   httpStatus?: number;
   errorKind?: "http" | "network" | "invalid-response";
   error?: string;
 }
 
+export interface EvaluateOptions {
+  neutralKeys?: boolean;
+}
+
+export interface EnsembleCaseResult {
+  caseId: string;
+  family: string;
+  rotation: number;
+  repeat: number;
+  expectedChoice: RelativeMove;
+  expectedDir: Dir;
+  choice: RelativeMove;
+  chosenDir: Dir;
+  status: "correct" | "wrong";
+  probabilities: Partial<Record<RelativeMove, number>>;
+}
+
+export interface EnsembleSummary {
+  total: number;
+  valid: number;
+  correct: number;
+  wrong: number;
+  accuracy: number | null;
+  byFamily: Record<string, { total: number; valid: number; correct: number; wrong: number; accuracy: number | null }>;
+  cases: EnsembleCaseResult[];
+}
+
 /** No game proxy, heuristic, retries, or fallback: score exactly what Laya returns. */
 export async function evaluateTrial(
   trial: Trial, endpoint: string, apiKey: string, fetcher: typeof fetch = fetch,
+  options?: EvaluateOptions,
 ): Promise<Result> {
   const start = performance.now();
   const result: Result = { ...trial, status: "error", latencyMs: 0 };
+  const labels = ["option_1", "option_2", "option_3", "option_4"];
+  const keyMap = Object.fromEntries(trial.order.map((key, idx) => [key, labels[idx]]));
+  const reverseMap = Object.fromEntries(trial.order.map((key, idx) => [labels[idx], key])) as Record<string, RelativeMove>;
+  const payload = options?.neutralKeys ? {
+    ...trial.payload,
+    questions: {
+      move: {
+        ...trial.payload.questions.move,
+        criteria: Object.fromEntries(trial.order.map((key) => [keyMap[key], trial.payload.questions.move.criteria[key]])),
+      },
+    },
+  } : trial.payload;
+
   try {
     const response = await fetcher(endpoint, {
       method: "POST", headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-      body: JSON.stringify(trial.payload), signal: AbortSignal.timeout(10_000),
+      body: JSON.stringify(payload), signal: AbortSignal.timeout(10_000),
     });
     result.httpStatus = response.status;
     const raw = await response.text();
@@ -87,14 +129,21 @@ export async function evaluateTrial(
       result.errorKind = "http";
       result.error = `HTTP ${response.status}`;
     } else {
-      const answer = (result.response as { answers?: { move?: { type?: unknown; choice?: unknown } } } | null)?.answers?.move;
-      if (answer?.type !== "choice" || typeof answer.choice !== "string" || !trial.order.includes(answer.choice as RelativeMove)) {
+      const answer = (result.response as { answers?: { move?: { type?: unknown; choice?: unknown; probabilities?: Record<string, number> } } } | null)?.answers?.move;
+      const rawChoice = typeof answer?.choice === "string" ? answer.choice : undefined;
+      const choice = (options?.neutralKeys && rawChoice ? reverseMap[rawChoice] : rawChoice) as RelativeMove | undefined;
+      if (answer?.type !== "choice" || !choice || !trial.order.includes(choice)) {
         result.errorKind = "invalid-response";
         result.error = "Expected answers.move with type=choice and an offered option";
       } else {
-        result.choice = answer.choice as RelativeMove;
+        result.choice = choice;
         result.chosenDir = trial.relativeToDir[result.choice];
         result.status = result.choice === trial.expectedChoice ? "correct" : "wrong";
+        if (answer.probabilities && typeof answer.probabilities === "object") {
+          result.probabilities = Object.fromEntries(
+            Object.entries(answer.probabilities).map(([k, p]) => [options?.neutralKeys ? reverseMap[k] ?? k : k, p]),
+          ) as Partial<Record<RelativeMove, number>>;
+        }
       }
     }
   } catch (error) {
@@ -137,10 +186,65 @@ export function summarize(results: Result[]) {
     comparableGroups++;
     if (new Set(group.map((r) => r.choice)).size > 1) changedGroups++;
   }
+
+  const ensembleCases: EnsembleCaseResult[] = [];
+  for (const group of groupBy(results, (r) => `${r.caseId}/${r.repeat}`).values()) {
+    const expectedCount = permutations(group[0].order).length;
+    if (group.length !== expectedCount || group.some((r) => r.status === "error")) continue;
+    const avgProbs: Record<string, number> = {};
+    for (const r of group) {
+      if (r.probabilities) {
+        for (const [k, p] of Object.entries(r.probabilities)) {
+          if (typeof p === "number") avgProbs[k] = (avgProbs[k] ?? 0) + (p / group.length);
+        }
+      }
+    }
+    let choice: RelativeMove | undefined;
+    if (Object.keys(avgProbs).length > 0) {
+      choice = (Object.entries(avgProbs).sort((a, b) => b[1] - a[1])[0][0] as RelativeMove);
+    } else {
+      const votes: Record<string, number> = {};
+      for (const r of group) {
+        if (r.choice) votes[r.choice] = (votes[r.choice] ?? 0) + 1;
+      }
+      choice = (Object.entries(votes).sort((a, b) => b[1] - a[1])[0]?.[0] as RelativeMove);
+    }
+    if (choice) {
+      const first = group[0];
+      ensembleCases.push({
+        caseId: first.caseId, family: first.family, rotation: first.rotation, repeat: first.repeat,
+        expectedChoice: first.expectedChoice, expectedDir: first.expectedDir,
+        choice, chosenDir: first.relativeToDir[choice],
+        status: choice === first.expectedChoice ? "correct" : "wrong",
+        probabilities: avgProbs,
+      });
+    }
+  }
+
+  const ensembleSummary: EnsembleSummary = {
+    total: ensembleCases.length,
+    valid: ensembleCases.length,
+    correct: ensembleCases.filter((c) => c.status === "correct").length,
+    wrong: ensembleCases.filter((c) => c.status === "wrong").length,
+    accuracy: ensembleCases.length ? ensembleCases.filter((c) => c.status === "correct").length / ensembleCases.length : null,
+    byFamily: Object.fromEntries(
+      [...groupBy(ensembleCases as unknown as Result[], (c) => (c as unknown as EnsembleCaseResult).family)].map(([fam, grp]) => {
+        const cGrp = grp as unknown as EnsembleCaseResult[];
+        const cCorrect = cGrp.filter((c) => c.status === "correct").length;
+        return [fam, {
+          total: cGrp.length, valid: cGrp.length, correct: cCorrect, wrong: cGrp.length - cCorrect,
+          accuracy: cGrp.length ? cCorrect / cGrp.length : null,
+        }];
+      }),
+    ),
+    cases: ensembleCases,
+  };
+
   return {
     ...counts(results),
     uniformRandomExpectedAccuracy: results.length ? results.reduce((sum, r) => sum + 1 / r.order.length, 0) / results.length : null,
     orderSensitivity: { comparableGroups, changedGroups },
+    ensemble: ensembleSummary,
     byFamily: breakdown((r) => r.family),
     byRotation: breakdown((r) => String(r.rotation)),
     byExpectedPosition: breakdown((r) => String(r.order.indexOf(r.expectedChoice) + 1)),

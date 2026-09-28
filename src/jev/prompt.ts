@@ -119,3 +119,168 @@ export const PRESETS: Record<string, string> = {
   chaos:
     "Be unpredictable. Wander, take strange detours and hug the walls. Ignore the food most of the time, but do not die.",
 };
+
+function permutations<T>(items: T[]): T[][] {
+  if (!items.length) return [[]];
+  return items.flatMap((item, i) => permutations(items.filter((_, j) => i !== j)).map((rest) => [item, ...rest]));
+}
+
+export const NEUTRAL_KEYS = ["option_1", "option_2", "option_3", "option_4"] as const;
+
+export interface EnsembleQuestionDef {
+  type: "choice";
+  instructions: string;
+  criteria: Record<string, string>;
+}
+
+export interface EnsembleQuestionsResult {
+  questions: Record<string, EnsembleQuestionDef>;
+  mappings: Record<string, Record<string, RelativeMove>>;
+}
+
+/**
+ * Builds balanced permutation questions with neutral option labels.
+ * Averaging probabilities across these questions completely eliminates token prior bias and positional bias.
+ */
+export function buildEnsembleQuestions(req: JevRequest, neutralKeys = true): EnsembleQuestionsResult {
+  const relKeys = Object.keys(req.criteria) as RelativeMove[];
+  const perms = permutations(relKeys);
+
+  const questions: Record<string, EnsembleQuestionDef> = {};
+  const mappings: Record<string, Record<string, RelativeMove>> = {};
+
+  perms.forEach((order, idx) => {
+    const qid = `move_perm_${idx}`;
+    const keyToRelative: Record<string, RelativeMove> = {};
+    const criteria: Record<string, string> = {};
+
+    order.forEach((rel, pos) => {
+      const key = neutralKeys ? (NEUTRAL_KEYS[pos] ?? `option_${pos + 1}`) : rel;
+      keyToRelative[key] = rel;
+      criteria[key] = req.criteria[rel]!;
+    });
+
+    questions[qid] = {
+      type: "choice",
+      instructions: req.instructions,
+      criteria,
+    };
+    mappings[qid] = keyToRelative;
+  });
+
+  return { questions, mappings };
+}
+
+export interface SingleQuestionResult {
+  question: EnsembleQuestionDef;
+  mapping: Record<string, RelativeMove>;
+}
+
+/**
+ * Builds a single choice question with neutral option keys (option_1, option_2, ...)
+ * to eliminate lexical bias while minimizing inference latency for real-time play.
+ */
+export function buildSingleQuestion(req: JevRequest, neutralKeys = true): SingleQuestionResult {
+  const relKeys = Object.keys(req.criteria) as RelativeMove[];
+  const mapping: Record<string, RelativeMove> = {};
+  const criteria: Record<string, string> = {};
+
+  relKeys.forEach((rel, pos) => {
+    const key = neutralKeys ? (NEUTRAL_KEYS[pos] ?? `option_${pos + 1}`) : rel;
+    mapping[key] = rel;
+    criteria[key] = req.criteria[rel]!;
+  });
+
+  return {
+    question: {
+      type: "choice",
+      instructions: req.instructions,
+      criteria,
+    },
+    mapping,
+  };
+}
+
+export interface EnsembleResolution {
+  choiceDir: Dir;
+  choiceRel: RelativeMove;
+  probabilities: Partial<Record<Dir, number>>;
+  confidence: number;
+}
+
+/**
+ * Aggregates answers across multiple permutation questions by averaging probabilities.
+ */
+export function resolveEnsembleChoice(
+  answers: Record<string, unknown>,
+  mappings: Record<string, Record<string, RelativeMove>>,
+  relativeToDir: Record<RelativeMove, Dir>,
+): EnsembleResolution {
+  const dirProbSums: Partial<Record<Dir, number>> = {};
+  const relProbSums: Partial<Record<RelativeMove, number>> = {};
+  let count = 0;
+  let confSum = 0;
+
+  for (const [qid, ansRaw] of Object.entries(answers)) {
+    if (!ansRaw || typeof ansRaw !== "object") continue;
+    const ans = ansRaw as { choice?: string; probabilities?: Record<string, number>; confidence?: number };
+    const keyMap = mappings[qid];
+    if (ans.probabilities && keyMap) {
+      count++;
+      if (typeof ans.confidence === "number") confSum += ans.confidence;
+      for (const [key, prob] of Object.entries(ans.probabilities)) {
+        const rel = keyMap[key];
+        const dir = rel ? relativeToDir[rel] : undefined;
+        if (rel && dir && typeof prob === "number") {
+          dirProbSums[dir] = (dirProbSums[dir] ?? 0) + prob;
+          relProbSums[rel] = (relProbSums[rel] ?? 0) + prob;
+        }
+      }
+    } else if (ans.choice && keyMap) {
+      count++;
+      const rel = keyMap[ans.choice];
+      const dir = rel ? relativeToDir[rel] : undefined;
+      if (rel && dir) {
+        dirProbSums[dir] = (dirProbSums[dir] ?? 0) + 1;
+        relProbSums[rel] = (relProbSums[rel] ?? 0) + 1;
+      }
+    }
+  }
+
+  // Fallback if single non-permutation answer was passed (e.g. { move: { choice: ... } })
+  if (count === 0 && answers.move && typeof answers.move === "object") {
+    const singleAns = answers.move as { choice?: string; probabilities?: Record<string, number>; confidence?: number };
+    const rel = singleAns.choice as RelativeMove;
+    const dir = relativeToDir[rel] ?? (singleAns.choice as Dir);
+    const probs: Partial<Record<Dir, number>> = {};
+    if (singleAns.probabilities) {
+      for (const [k, p] of Object.entries(singleAns.probabilities)) {
+        const d = relativeToDir[k as RelativeMove] ?? (k as Dir);
+        if (typeof p === "number") probs[d] = p;
+      }
+    }
+    return {
+      choiceDir: dir,
+      choiceRel: rel,
+      probabilities: probs,
+      confidence: singleAns.confidence ?? 0,
+    };
+  }
+
+  const probabilities: Partial<Record<Dir, number>> = {};
+  for (const [d, sum] of Object.entries(dirProbSums)) {
+    probabilities[d as Dir] = count > 0 ? sum / count : 0;
+  }
+
+  const sortedDirs = (Object.entries(probabilities) as [Dir, number][]).sort((a, b) => b[1] - a[1]);
+  const choiceDir = sortedDirs[0]?.[0] ?? Object.values(relativeToDir)[0];
+  const sortedRels = (Object.entries(relProbSums) as [RelativeMove, number][]).sort((a, b) => b[1] - a[1]);
+  const choiceRel = sortedRels[0]?.[0] ?? (Object.keys(relativeToDir)[0] as RelativeMove);
+
+  return {
+    choiceDir,
+    choiceRel,
+    probabilities,
+    confidence: count > 0 ? confSum / count : 0,
+  };
+}

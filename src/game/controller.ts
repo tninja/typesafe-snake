@@ -135,7 +135,7 @@ export class GameController {
     this.snapshot = {
       game: createGame({ ...this.size, seed: this.seed }),
       status: "idle",
-      tickMs: options.tickMs ?? 1200,
+      tickMs: options.tickMs ?? 2000,
       tickStartedAt: 0,
       strategy: PRESETS.safe,
       decision: null,

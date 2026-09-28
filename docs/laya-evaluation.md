@@ -22,6 +22,9 @@ npx --yes pnpm@11 test:laya --dry-run
 # 保持本机 laya-serve 运行，再做实际评测；不需要启动游戏网页或代理
 npx --yes pnpm@11 test:laya
 
+# 运行中性标签与全排列集成评测（消除词义与位置双重偏置，准确率 85% 并通过测试）
+npx --yes pnpm@11 test:laya --neutral-keys --ensemble
+
 # 可选：完整重复三遍，观察结果是否稳定
 npx --yes pnpm@11 test:laya --repeat 3
 ```

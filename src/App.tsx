@@ -12,6 +12,7 @@ const pad = (n: number, width: number) => String(n).padStart(width, "0");
 
 const SPEEDS = [
   { label: "0.5 steps/s", tickMs: 2000 },
+  { label: "0.7 steps/s", tickMs: 1500 },
   { label: "0.8 steps/s", tickMs: 1200 },
   { label: "1 step/s", tickMs: 1000 },
   { label: "1.5 steps/s", tickMs: 660 },

@@ -92,4 +92,47 @@ describe("direct inference and scoring", () => {
     expect(summarize([error]).accuracyAmongValid).toBeNull();
     expect(summarize([]).endToEndAccuracy).toBeNull();
   });
+
+  it("supports neutralKeys to map criteria to opaque labels and decode response", async () => {
+    const mockFetch = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({
+        model: "laya-rl-agent",
+        answers: {
+          move: {
+            type: "choice",
+            choice: "option_2",
+            probabilities: { option_1: 0.2, option_2: 0.6, option_3: 0.2 },
+          },
+        },
+      })),
+    );
+    const result = await evaluateTrial(trial, "http://localhost", "", mockFetch, { neutralKeys: true });
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const sentBody = JSON.parse(mockFetch.mock.calls[0][1]!.body as string);
+    expect(Object.keys(sentBody.questions.move.criteria)).toEqual(["option_1", "option_2", "option_3"]);
+    expect(result.choice).toBe(trial.order[1]);
+    expect(result.probabilities?.[trial.order[1]]).toBe(0.6);
+  });
+
+  it("calculates ensemble accuracy by averaging probabilities across permutations", async () => {
+    const variants = buildTrials().filter((t) => t.caseId === trial.caseId);
+    // Across 6 permutations, return probabilities that favor the expected choice
+    const results = await Promise.all(variants.map((t) => evaluateTrial(t, "http://localhost", "",
+      async () => new Response(JSON.stringify({
+        model: "laya-rl-agent",
+        answers: {
+          move: {
+            type: "choice",
+            choice: t.expectedChoice,
+            probabilities: { [t.expectedChoice]: 0.5, [t.order.find((o) => o !== t.expectedChoice)!]: 0.25 },
+          },
+        },
+      })))));
+    const summary = summarize(results);
+    expect(summary.ensemble.total).toBe(1);
+    expect(summary.ensemble.correct).toBe(1);
+    expect(summary.ensemble.accuracy).toBe(1);
+    expect(summary.ensemble.cases[0].choice).toBe(trial.expectedChoice);
+  });
 });
+

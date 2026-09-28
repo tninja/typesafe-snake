@@ -2,8 +2,13 @@ import { serve } from "@hono/node-server";
 import { TypeSafeClient, choice } from "@typesafe-ai/sdk";
 import { Hono } from "hono";
 import { analyze, heuristicMove } from "../src/game/analysis.ts";
-import { DIRS, type Dir, type GameState, type Point } from "../src/game/engine.ts";
-import { buildRequest, type RelativeMove } from "../src/jev/prompt.ts";
+import { DIRS, type GameState, type Point } from "../src/game/engine.ts";
+import {
+  buildEnsembleQuestions,
+  buildRequest,
+  buildSingleQuestion,
+  resolveEnsembleChoice,
+} from "../src/jev/prompt.ts";
 import type { DecidePayload, DecideResult } from "../src/jev/types.ts";
 
 const gatewayKey = process.env.AI_GATEWAY_API_KEY;
@@ -16,7 +21,7 @@ if (!gatewayKey && !typesafeKey) {
 const client = new TypeSafeClient(
   gatewayKey
     ? { apiKey: gatewayKey, baseURL: "https://ai-gateway.vercel.sh/typesafe" }
-    : { apiKey: typesafeKey },
+    : { apiKey: typesafeKey, baseURL: process.env.TYPESAFE_BASE_URL },
 );
 const app = new Hono();
 
@@ -70,34 +75,42 @@ app.post("/api/decide", async (c) => {
 
   const strategy = typeof body.strategy === "string" ? body.strategy.slice(0, 600) : "";
   const request = buildRequest(game, facts, strategy);
+  const useEnsemble = Boolean((body as any)?.ensemble);
+
+  const { questions, mappings } = useEnsemble
+    ? buildEnsembleQuestions(request)
+    : (() => {
+        const single = buildSingleQuestion(request);
+        return {
+          questions: { move: single.question },
+          mappings: { move: single.mapping },
+        };
+      })();
+
+  const model = process.env.TYPESAFE_MODEL ?? (process.env.TYPESAFE_BASE_URL ? "english" : undefined);
   const started = performance.now();
   try {
     const res = await client.systemOne(
       {
+        ...(model ? { model } : {}),
         state: request.state as never,
-        questions: { move: choice(request.instructions, request.criteria as Record<string, string>) },
+        questions: Object.fromEntries(
+          Object.entries(questions).map(([qid, q]) => [qid, choice(q.instructions, q.criteria)]),
+        ) as never,
       },
       // The browser aborts at the tick deadline; a retry could never land in time.
       { signal: c.req.raw.signal, timeout: 5000, retry: { maxRetries: 0 } },
     );
-    const answer = res.answers.move;
-    const choiceRel = answer.choice as RelativeMove;
-    const choiceDir = (request.relativeToDir[choiceRel] ?? answer.choice) as Dir;
-
-    const probabilities: Partial<Record<Dir, number>> = {};
-    if (answer.probabilities) {
-      for (const [key, prob] of Object.entries(answer.probabilities)) {
-        const dir = (request.relativeToDir[key as RelativeMove] ?? key) as Dir;
-        if (typeof prob === "number") {
-          probabilities[dir] = prob;
-        }
-      }
-    }
+    const { choiceDir, probabilities, confidence } = resolveEnsembleChoice(
+      res.answers as Record<string, unknown>,
+      mappings,
+      request.relativeToDir,
+    );
 
     const result: DecideResult = {
       choice: choiceDir,
       probabilities,
-      confidence: answer.confidence,
+      confidence,
       model: res.model,
       upstreamMs: Math.round(performance.now() - started),
       inputTokens: res.usage?.input_tokens ?? null,
